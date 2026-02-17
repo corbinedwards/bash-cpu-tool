@@ -1,4 +1,6 @@
 # CPU Visualizer
+<img width="967" height="373" alt="sc" src="https://github.com/user-attachments/assets/99dbd3e5-8398-4925-ad7b-f5420692f1eb" />
+
 
 Bash script that visualizes CPU usage (Linux machines only).
 
@@ -10,7 +12,7 @@ In addition, I've added a "total" CPU bar and re-arranged some of the code from 
 To run, from a bash (or supported) shell you'll want to give execution permissions to the script if necessary:
 
 ```
-chmod +x ~/path/to/script/cpu
+sudo chmod +x ~/path/to/script/cpu
 ```
 
 Then execute. CTRL + C to stop the process.
