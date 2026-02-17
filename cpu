@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+
+CURRENT=() # Key = CPU number, Value = "BusyTime IdleTime"; Ex. [0] = "12345 12313"
+PREVIOUS=() # Serves as copy of CURRENT to calculate usage percentages every re-render
+CURRENT_TOTAL= # Holds "BusyTime IdleTime" value for total CPU usage; Ex. "12345 12313"
+PREVIOUS_TOTAL= # Copy of CURRENT_TOTAL to compare on re-render
+
+TOTAL_KEY='TOTAL'
+
+# Defaults for rendering lines and usage bars
+BAR_CHAR='|'
+EMPTY_CHAR=' '
+BAR_LENGTH=30
+ALL_CPUS=(/sys/devices/system/cpu/cpu[0-9]*)
+
+# NO_COLOR mode on/off
+if [[ -z $NO_COLOR ]]; then
+  BAR_COLOR=$'\e[31m'
+  CPU_COLOR=$'\e[35m'
+  TOTAL_CPU_COLOR=$'\e[33m'
+  PERCENT_COLOR=$'\e[36m'
+  DIM=$'\e[2m'
+  RST=$'\e[0m'
+else 
+  BAR_COLOR=
+  CPU_COLOR=
+  TOTAL_CPU_COLOR=
+  PERCENT_COLOR=
+  DIM=
+  RST=
+fi
+
+# copy the data from the current array into the previous array
+copy-data() {
+  PREVIOUS_TOTAL=$CURRENT_TOTAL
+  PREVIOUS=()
+
+  local key value
+  for key in "${!CURRENT[@]}"; do
+    value=${CURRENT[$key]}
+    PREVIOUS[$key]=$value
+  done
+}
+
+read-all-cpus() {
+  ALL_CPUS=("${ALL_CPUS[@]##*/cpu}") # cut off path up to cpu number
+}
+
+# read from /proc/stat and add values to CURRENT
+read-proc() {
+  local key user nice system idle iowait
+  local irq softirq steal guest guest_nice
+
+  # Clear CURRENT keys and values
+  CURRENT=()
+  for key in "${!ALL_CPUS[@]}"; do
+    CURRENT[$key]=
+  done
+
+  local busy value
+  while read -r key user nice system idle iowait \
+    irq softirq steal guest guest_nice; do
+    # Skip other lines in /proc/stat that do not pertain to CPU usage
+    if [[ $key != cpu* ]]; then
+      continue
+    fi
+
+    busy=$((user + nice + system + irq + softirq + steal + guest + guest_nice))
+    idle=$((idle + iowait))
+    value="$busy $idle"
+
+    if [[ $key == 'cpu' ]]; then
+      CURRENT_TOTAL=$value
+    else
+      local cpu_num=${key#cpu}
+      CURRENT[$cpu_num]=$value
+    fi
+  done </proc/stat
+}
+
+# app display
+visualize-data() {
+  local now
+  printf -v now '%(%Y-%m-%dT%H:%M:%S)T\n'
+
+  # Top Line
+  echo "${DIM}CPU Usage on $HOSTNAME - $now$RST"
+
+  # Print total CPU line
+  print-cpu $TOTAL_KEY
+  # Print line for every CPU 
+  local key
+  for key in "${!CURRENT[@]}"; do
+    print-cpu "$key"
+  done
+}
+
+print-cpu() {
+  local key=$1
+
+  local prev_busy prev_idle current_busy current_idle
+  local cpu_name
+  if [[ $key == $TOTAL_KEY ]]; then
+    read -r prev_busy prev_idle <<<"${PREVIOUS_TOTAL}"
+    read -r current_busy current_idle <<<"${CURRENT_TOTAL}"
+    cpu_name="${TOTAL_CPU_COLOR}total$RST"
+  else
+    read -r prev_busy prev_idle <<<"${PREVIOUS[$key]}"
+    read -r current_busy current_idle <<<"${CURRENT[$key]}"
+    cpu_name="${CPU_COLOR}cpu$key$RST"
+  fi
+
+  local usage online
+  if [[ -z $prev_busy  || -z $current_busy ]]; then
+    # offline CPU
+    usage=0
+    online=
+  else
+    # online CPU
+    local busy=$((current_busy - prev_busy))
+    local idle=$((current_idle - prev_idle))
+    local total=$((busy + idle))
+
+    usage=$((1000 * busy / total))
+    online=1
+  fi
+
+  local num_bars=$((usage * BAR_LENGTH / 1000))
+
+  # Build percentage string since bash doesn't do floating points very well
+  local perc_int=$((usage / 10))
+  local perc_frac=$((usage % 10))
+  local perc=$perc_int.$perc_frac
+
+  local i
+  local bar_string='['
+
+  # print left-bound bars
+  for ((i = 0; i < num_bars; i++)); do
+    bar_string+=$BAR_COLOR$BAR_CHAR$RST
+  done
+  # print right-bound empty space
+  for ((i = num_bars; i < BAR_LENGTH; i++)); do
+    bar_string+=$EMPTY_CHAR
+  done
+  bar_string+=']'
+
+  if [[ -n $online ]]; then
+    state=$PERCENT_COLOR$perc%$RST
+  else 
+    state=${DIM}'offline'$RST
+  fi
+
+  echo "$bar_string $cpu_name $state"
+}
+
+update-window-size() {
+  if [[ -n $COLUMNS ]]; then
+    # figure out how much buffer room is needed
+    local cpus=( "${!CURRENT[@]}" )
+    local highest_cpu=${cpus[-1]}
+    # string length of literals in line
+    local square_brackets=2
+    local space=1
+    local cpu=3
+    local highest_percent=6 # 100.0%
+
+    # [] + " cpu" + num + " 100.0%"
+    constants=$((square_brackets + space + cpu + ${#highest_cpu} + space + highest_percent))
+    # COLUMNS from shopt statement in main()
+    BAR_LENGTH=$((COLUMNS - constants)) 
+  fi
+}
+
+cleanup() {
+  printf '\e[?1049l' # disable alternate buffer
+  printf '\e[?25h'   # show cursor
+}
+
+main() {
+  # Detect and initialize window $COLUMNS and $ROWS (see update-window-size)
+  shopt -s checkwinsize
+
+  read-all-cpus
+  read-proc
+  echo "waiting for data..."
+  sleep 1
+
+  # call cleanup when program is terminated
+  trap cleanup EXIT
+  # call update-window-size on window change
+  trap update-window-size WINCH
+
+  printf '\e[?1049h' # enable alternate buffer
+  printf '\e[?25l'   # hide cursor
+  printf '\e[H'      # move the cursor home
+
+  update-window-size
+
+  local app
+  while true; do
+    copy-data
+    read-proc
+
+    app=${ visualize-data; }
+
+    printf '\e[2J' # clear screen
+    printf '\e[H'  # move cursor to "overwrite" screen
+    echo -n "$app"
+
+    sleep 1
+  done
+}
+
+main
+
